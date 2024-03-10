@@ -1,0 +1,1484 @@
+---
+title: 'P3 (Philadelphia Permitting Predictions)'
+author: "Keon Monroe & Scott Mullarkey"
+date: "12/20/2019"
+output: 
+  html_document:
+    code_folding: hide
+---
+```{r fullCode, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	fig.align = "center",
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	results = TRUE
+)
+
+
+
+```
+![](https://whyy.org/wp-content/uploads/2018/03/northern-liberties-gentrification_emma_Lee_whyy-768x512.jpg) <br>
+*Image Source - [WHYY](https://whyy.org/articles/gentrified-series-draws-stories-changing-relationships-across-philly/)*
+
+### Introduction
+Neighborhoods across Philadelphia are undergoing rapid change [with the development of new business districts](https://www.phillymag.com/news/2019/03/25/philadelphia-gentrification-report/).  As real estate investors and developers seek to capitalize on emerging investment opportunities across the City, they can review current listings for properties available at this point in time. Exploratory research could identify what neighborhoods are the most attractive for businesses. But without the help of outside experts or consulting services, how would they know what areas would be good for future development?
+
+P3 is a conceptual application that utilizes publicly available data from the City of Philadelphia on construction permits to predict where in the city are permits most likely to be issued, and during what time. By understanding this phenomena, the app provides useful insight for its users in terms of knowing where hotspot areas might occur, and at what time development may prove to be most advantageous for them. 
+
+[This Pecha Kucha video](https://youtu.be/5S1iocDMAQs) explains P3 functionality and vision. On this page, what follows is a technical explanation of the app’s predictive functionalities, represented by the use of modern machine learning technologies in the R programming language. Concluding remarks review P3’s theoretical implementation, and its potential impacts within the Greater Philadelphia region. 
+
+### 1. Methods
+
+#### Data Sources & Initial Wrangling
+The app’s main data source comprises over 612,000 licenses and inspections building permits located at [OpenDataPhilly](https://www.opendataphilly.org/dataset/licenses-and-inspections-building-permits). This dataset was filtered to include only new construction permits issued from 01/01/2009 and 12/31/2018 located within the census tracts of the City. This time span represents the study range for the predictive functionality of the app. Consequently all  subsequent data was reviewed within this study range. After filtering, the permitting dataset consisted of 12,745 new construction permits. Using a spatial intersection operation from the simple features library in R, addresses for all the filtered permits were then matched to their respective census tract using the [tidycensus library](https://walkerke.github.io/tidycensus/) in R which pulls data from the [US Census Bureau](https://www.census.gov/). Permit issue dates were included as well which allowed us to assign various time intervals for each permit issued using the [lubridate library](https://lubridate.tidyverse.org/) in R.
+
+We filtered the type of permits issued by type to aggregate subsets of data for new construction, demolition, alteration, demolition, and zoning. This allowed our model to incorporate additional development activities occuring in the city during the same time frame. 
+
+A variety of other open data was collected to generate additional temporal features for P3’s predictive modeling. These are data sources we believe would be indicative of trends related to building permit activity. We gathered broad economic data available at the [St. Louis Federal Reserve Bank](https://fred.stlouisfed.org/). This included [Libor](https://fred.stlouisfed.org/series/USD1MTD156N) and [10-year Treasury Rates](https://fred.stlouisfed.org/series/DGS10), which allowed P3’s predictive model to incorporate pricing of construction financing during this period as construction loan rates are often use these rates as a base. The Producer Price Indexes for [Lumber](https://fred.stlouisfed.org/series/WPU085), [Construction Equipment](https://fred.stlouisfed.org/series/WPS112) and [Cement](https://fred.stlouisfed.org/series/PCU32733273) as well as [US Unemployment Rate](https://fred.stlouisfed.org/series/UNRATE) were also gathered from the same source, which allowed the model to incorporate pricing of construction inputs during the study period. National US rates were used - as opposed to more local rates - since construction materials and labor aren’t always sourced locally. Finally, [US GDP](https://fred.stlouisfed.org/series/GDP) allowed our model to factor in the US recession that occurred from December 2007 to June 2009. 
+
+#### Time Lags
+Determining the best time to develop is one of the main highlights of P3. We incorporate a variety of time lags of permit counts using the [lubridate library](https://lubridate.tidyverse.org/) in R. This allowed the model to factor in temporal and seasonal impacts on the issuance of permits. This is a common trend within time-series forecasting models because historic data can often be indicative of future activity (in this case building development).
+
+Each of these variables were explored through a variety of charts and maps to view their temporal and spatial patterns. 
+
+#### Design
+Next, a study panel was created which formed a data frame of all of the variables listed across all quarters throughout the time range of interest. We chose a quarter (~90 days) as the temporal unit of measure, and a census tract as the spatial unit of measure. Several models were made to predict from one year to the next consecutive year, using the input year as the training data and the test data as the subsequent year - for each year within our time range. For example, a model was made using 2013 permitting data, and then tested on 2014 data. In this way we were able to gather information on the accuracy of making predictions year over year.
+
+The models were built using two types of regression - OLS (linear) regression using the _lm()_ function and Poisson Regression with the _glm()_ function. Permit count was the independent variable of both types Finally, using a nested data frame structure we them mapped through the years to make predictions using the _predict()_ function and _map()_. This process was able to iteratively run through each year and it's following year computationally. Error metrics were then examined for accuracy.
+
+### 2. Exploratory Analysis
+
+#### Setup
+The model begins by downloading the required R libraries.  It then sets up plot and map themes as well as a color palette.  This allows the model to produce consistent visualizations throughout.
+```{r addsetup, echo=TRUE, results = 'hide'}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#setwd("C:/Users/scott/Desktop/MUSA507/Final")
+options(scipen=999)
+
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(tigris)
+library(tidycensus)
+library(viridis)
+library(riem)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(RSocrata)
+library(gganimate)
+library(ggplot2)
+
+
+plotTheme <- theme(
+  plot.title =element_text(size=12),
+  plot.subtitle = element_text(size=8),
+  plot.caption = element_text(size = 6),
+  axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 10),
+  axis.title.y = element_text(size = 10),
+  # Set the entire chart region to blank
+  panel.background=element_blank(),
+  plot.background=element_blank(),
+  #panel.border=element_rect(colour="#F0F0F0"),
+  # Format the grid
+  panel.grid.major=element_line(colour="#D0D0D0",size=.2),
+  axis.ticks=element_blank())
+
+mapTheme <- theme(plot.title =element_text(size=12),
+                  plot.subtitle = element_text(size=8),
+                  plot.caption = element_text(size = 6),
+                  axis.line=element_blank(),
+                  axis.text.x=element_blank(),
+                  axis.text.y=element_blank(),
+                  axis.ticks=element_blank(),
+                  axis.title.x=element_blank(),
+                  axis.title.y=element_blank(),
+                  panel.background=element_blank(),
+                  panel.border=element_blank(),
+                  panel.grid.major=element_line(colour = 'transparent'),
+                  panel.grid.minor=element_blank(),
+                  legend.direction = "vertical", 
+                  legend.position = "right",
+                  plot.margin = margin(1, 1, 1, 1, 'cm'),
+                  legend.key.height = unit(1, "cm"), legend.key.width = unit(0.2, "cm"))
+
+palette5 <- c("#eff3ff","#bdd7e7","#6baed6","#3182bd","#08519c")
+palette4 <- c("#D2FBD4","#92BCAB","#527D82","#123F5A")
+palette2 <- c("#6baed6","#08519c")
+
+
+
+```
+
+#### New Construction Permits
+A data frame is created that includes the base data of over 612,000 licenses and inspections building permits.  This is then filtered by type and date to create a data frame that only includes new construction permits between 01/01/2009 and 12/31/2018.  Census tracts are then added to ensure the set only includes permits issued within census tracts of Philadelphia. This narrowed the dataset down to 12,745 observations.
+```{r addNCPermits, echo=TRUE, results = 'hide'}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Import Construction and Census Data-------------------
+##IMPUT NEW CONSTRUCTION DATA
+
+#Upload permit data & filter by type & filter by date
+#Source: https://www.opendataphilly.org/dataset/licenses-and-inspections-building-permits
+permits <- read_sf("https://phl.carto.com/api/v2/sql?q=SELECT+*+FROM+li_permits&filename=li_permits&format=geojson&skipfields=cartodb_id")
+newConstruct <- permits[permits$permittype == 'BP_NEWCNST',]
+newConstruct <- newConstruct[newConstruct$permitissuedate >= '2008-12-31 00:00:00',]
+newConstruct <- newConstruct[newConstruct$permitissuedate <= '2018-12-31 23:59:59',]
+
+dat <- newConstruct %>%
+  mutate(interval60 = floor_date(ymd_hms(permitissuedate), unit = "hour"),
+         interval15 = floor_date(ymd_hms(permitissuedate), unit = "15 mins"),
+         interval_month = floor_date(ymd_hms(permitissuedate), unit = "month"),
+         interval_quarter = floor_date(ymd_hms(permitissuedate), unit = "quarter"),
+         interval_year = floor_date(ymd_hms(permitissuedate), unit = "year"),
+         year = year(interval60),
+         quarter = quarter(interval60),
+         month = month(interval60),
+         week = week(interval60),
+         dotw = wday(interval60, label=TRUE))
+
+
+##INPUT CENSUS DATA
+
+ census_api_key("7c4f7a4ee0b34622dcab1bef185348b87ae7b355", overwrite = TRUE)
+ 
+ phillyCensus <- 
+   get_acs(geography = "tract", 
+           variables = c("B01003_001", "B19013_001", 
+                         "B02001_002", "B08013_001",
+                         "B08012_001", "B08301_001", 
+                         "B08301_010", "B01002_001"), 
+           year = 2010, 
+           state = "PA", 
+           geometry = TRUE, 
+           county=c("Philadelphia"),
+           output = "wide") %>%
+   rename(Total_Pop =  B01003_001E,
+          Med_Inc = B19013_001E,
+          Med_Age = B01002_001E,
+          White_Pop = B02001_002E,
+          Travel_Time = B08013_001E,
+          Num_Commuters = B08012_001E,
+          Means_of_Transport = B08301_001E,
+          Total_Public_Trans = B08301_010E) %>%
+   select(Total_Pop, Med_Inc, White_Pop, Travel_Time,
+          Means_of_Transport, Total_Public_Trans,
+          Med_Age,
+          GEOID, geometry) %>%
+   mutate(Percent_White = White_Pop / Total_Pop,
+          Mean_Commute_Time = Travel_Time / Total_Public_Trans,
+          Percent_Taking_Public_Trans = Total_Public_Trans / Means_of_Transport)
+
+
+phillyTracts <- 
+  phillyCensus %>%
+  as.data.frame() %>%
+  distinct(GEOID, .keep_all = TRUE) %>%
+  select(GEOID, geometry) %>% 
+  st_sf
+
+phillyTracts.sf <- 
+  phillyTracts %>% 
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, agr = "constant") %>%
+  st_transform(st_crs(dat), 
+               join=st_intersects,
+               left = TRUE) 
+
+# intersection of permit data (dat) and census tracts (phillyTracts.sf)
+data_census <- st_intersection(dat, phillyTracts.sf)
+
+# unmapping geometry as lat/long
+data_census <- data_census %>%
+  mutate(lat = unlist(map(data_census$geometry,1)),
+         long = unlist(map(data_census$geometry,2)))
+
+
+```
+
+The model then produces a line graph of new construction permits by quarter.  This allows for the visualization of the data over time to get a sense of direction and trending.  The graph shows a positive trend over the 10 year period while also highlighting seasonal dips in the first quarter of each year. We suspect this is likely due to a slowdown during the holiday season and change in weather.
+```{r addGraph1, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#Create linegraph of new construction permits by quarter
+ggplot(data_census %>%
+         group_by(interval_quarter) %>%
+         tally())+
+  geom_line(aes(x = interval_quarter, y = n))+
+  labs(title="New construction permits issued per quarter, Philadelphia",
+       x="Date", 
+       y="Permits issued")+
+  plotTheme
+
+
+```
+
+An additional line graph is generated that shows quarterly permits by year.  Here again we see lower permit counts in the first quarter.  This is not surprising as starting a new construction project in the first quarter would mean that a project is completing site and foundation work in the winter which take more time and require more expensive materials.  There is a greater incentive to begin a project when the weather is warmer which is consistent with the data of actual permits issued.  
+```{r addGraph2, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#Create linegraph of quarterly new construction permits by year
+data_census$year2<-as.character(as.numeric(data_census$year))
+ggplot(data_census %>% mutate(quarter = quarter(permitissuedate)))+
+  geom_freqpoly(aes(quarter, color = year2), binwidth = 1)+
+  labs(title="Quarterly new construction permits in Philadelphia by year",
+       x="Quarter", 
+       y="Permit Counts")+
+  plotTheme
+
+
+```
+
+A set of facetted maps are generated which shows the actual permit count by census tract for each of the 10 years.  Here we see permit counts are generally even throughout the city on the lower end of the scale but higher permits counts seem to be concentrated in the Kensington and Fishtown neighborhoods.  
+```{r addGraph3, echo=TRUE, fig.height=15, fig.width=7.5}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Visualize permit count by year for each tract-------------------
+data_census$permit <- 1
+
+countPermits <- function(x) {
+  subData <- 
+    # selects each year as x
+    data_census[data_census$year == x,]%>% 
+    # converts to sf and then transforms on the census tracts
+    st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(phillyTracts.sf))
+  # aggregate an sf object, unionizing the geometries
+  sumPermits <- aggregate( permit ~ GEOID, subData, sum)
+  # what does double arrow do? 
+  # what is column y? match returns a vector of the positions of (first) matches of its 1st arg in its second
+  phillyTracts.sf$y <<- sumPermits$permit[match(phillyTracts.sf$GEOID, sumPermits$GEOID)]
+  phillyTracts.sf$y[is.na(phillyTracts.sf$y)] <<- 0
+}
+
+# call the function on each year of permits
+countPermits('2009'); colnames(phillyTracts.sf)[colnames(phillyTracts.sf)=="y"] <- "p2009"
+countPermits('2010'); colnames(phillyTracts.sf)[colnames(phillyTracts.sf)=="y"] <- "p2010"
+countPermits('2011'); colnames(phillyTracts.sf)[colnames(phillyTracts.sf)=="y"] <- "p2011"
+countPermits('2012'); colnames(phillyTracts.sf)[colnames(phillyTracts.sf)=="y"] <- "p2012"
+countPermits('2013'); colnames(phillyTracts.sf)[colnames(phillyTracts.sf)=="y"] <- "p2013"
+countPermits('2014'); colnames(phillyTracts.sf)[colnames(phillyTracts.sf)=="y"] <- "p2014"
+countPermits('2015'); colnames(phillyTracts.sf)[colnames(phillyTracts.sf)=="y"] <- "p2015"
+countPermits('2016'); colnames(phillyTracts.sf)[colnames(phillyTracts.sf)=="y"] <- "p2016"
+countPermits('2017'); colnames(phillyTracts.sf)[colnames(phillyTracts.sf)=="y"] <- "p2017"
+countPermits('2018'); colnames(phillyTracts.sf)[colnames(phillyTracts.sf)=="y"] <- "p2018"
+
+# need to transform df into long format so you get each year as a variable
+phillyTracts.long <- phillyTracts.sf %>%
+  gather(year, permitCount, p2009:p2018)
+
+ 
+ggplot() + 
+  geom_sf(data = phillyTracts.long, aes(fill = permitCount)) + 
+  labs(title = "New Construction Permits, Philadelphia") +
+  mapTheme + facet_wrap(~year, ncol=2) + scale_fill_viridis_c(option = "plasma")
+
+```
+
+A bar graph is generated which plots total permit counts by year.  Here we see the upward trend in total permit counts.  Lower permit counts in the earlier years is not surprising as the recession was just ending and the long recovery period was beginning.
+```{r addGraph4, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+# bar plot the number of permits by year
+#  2016 - 2018 saw the most issued out of the whole 10 years
+phillyTracts.long %>% ggplot() +
+  geom_bar(mapping = aes(x = year, y = permitCount),stat = "identity")
+
+
+```
+
+A second bar graph is generated that shows total permit counts by census tract.  Here we see some clear peaks several of which correspond with the Kensington and Fishtown neighborhoods.
+```{r addGraph5, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+# bar plot the number of permits by tract
+# only a few have over 200 - all time 
+phillyTracts.long %>% ggplot() +
+  geom_bar(mapping = aes(x = GEOID, y = permitCount),stat = "identity")
+
+
+```
+
+The same data is shown as a scatterplot which allows for the incorporation of time by visualizing each year as a different color.  Here it shows the time scale of when permits were issued in each of the census tracts rather than just the total.
+```{r addGraph6, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+# scatter plot the number of permits by tract
+# most issued in one year is about 150
+phillyTracts.long %>% ggplot(aes(x = GEOID, y = permitCount, color = year)) +
+  geom_point()
+
+
+```
+
+A summary of mean permit counts by year is generated which shows an upward trend in permits issued over 10 years.  This confirms the earlier assessment that the highest number of permits issued happened in the last couple of years.
+```{r addGraph7, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+# mean number issued by year?
+phillyTracts.long %>% group_by(year) %>% summarise(avg = mean(permitCount))%>%
+  arrange(desc(avg)) # arrange top 10 in descending order
+
+
+
+```
+
+A summary of mean permit counts by year and by tract is generated which shows an upward trend in permits issued and larger concentrations in the Kensington and Fishtown tracts.  This also confirms the earlier assessment of trend inferred from the facetted maps.
+```{r addGraph8, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+# mean number issued by year by tract?
+phillyTracts.long %>% group_by(GEOID) %>% summarise(avg = mean(permitCount)) %>%
+  arrange(desc(avg)) # arrange top 10 in descending order
+
+
+```
+
+A histogram of permit counts by census tract shows that there is a higher frequency of tracts with very low to zero permits issued.  This highlights that large permit counts are a rare occurence. 
+```{r addGraph9a, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+hist(phillyTracts.long$permitCount)
+
+
+```
+
+A second histogram of permit counts by census tract is generated with 30 breaks.  This again shows that there is a higher frequency of tracts with very low to zero permits issued.  
+```{r addGraph9b, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+hist(phillyTracts.long$permitCount, breaks = 30)
+
+
+```
+
+A third histogram is generated of the _log()_ of permit counts by census.  Majority of observations are between 0 and 1.
+```{r addGraph9c, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+hist(log(phillyTracts.long$permitCount), breaks = 30)
+
+
+```
+
+
+#### Temporal Data
+Three data frames are created using the base data of over 612,000 licenses and inspections building permits.  Each is filtered by the same 10 year time period but with filters on different permit types: demolition, alteration, and zoning.  Here these are alternative types of development and are viewed as potential indicators of local development.  This data is then plotted on a line graph.  Review shows that each shares the same upward trend as the new construction permits.  Zoning permits shows more volatility than the other two.
+```{r addTempPermits, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#------------------- Temporal Data -------------------
+# demolition
+demolition <- permits[permits$permittype == 'BP_DEMO',]
+demolition <- demolition[demolition$permitissuedate >= '2008-12-31 00:00:00',]
+demolition <- demolition[demolition$permitissuedate <= '2018-12-31 23:59:59',]
+tempData1 <- demolition %>%
+  mutate(interval60 = floor_date(ymd_hms(permitissuedate), unit = "hour"),
+         interval15 = floor_date(ymd_hms(permitissuedate), unit = "15 mins"),
+         interval_month = floor_date(ymd_hms(permitissuedate), unit = "month"),
+         interval_quarter = floor_date(ymd_hms(permitissuedate), unit = "quarter"),
+         interval_year = floor_date(ymd_hms(permitissuedate), unit = "year"),
+         year = year(interval60),
+         quarter = quarter(interval60),
+         month = month(interval60),
+         week = week(interval60),
+         dotw = wday(interval60, label=TRUE))
+
+# aleteration
+alteration <- permits[permits$permittype == 'BP_ALTER',]
+alteration <- alteration[alteration$permitissuedate >= '2008-12-31 00:00:00',]
+alteration <- alteration[alteration$permitissuedate <= '2018-12-31 23:59:59',]
+tempData2 <- alteration %>%
+  mutate(interval60 = floor_date(ymd_hms(permitissuedate), unit = "hour"),
+         interval15 = floor_date(ymd_hms(permitissuedate), unit = "15 mins"),
+         interval_month = floor_date(ymd_hms(permitissuedate), unit = "month"),
+         interval_quarter = floor_date(ymd_hms(permitissuedate), unit = "quarter"),
+         interval_year = floor_date(ymd_hms(permitissuedate), unit = "year"),
+         year = year(interval60),
+         quarter = quarter(interval60),
+         month = month(interval60),
+         week = week(interval60),
+         dotw = wday(interval60, label=TRUE))
+
+#zoning
+zoning <- permits[permits$permittype == 'ZP_ZONING',]
+zoning <- zoning[zoning$permitissuedate >= '2008-12-31 00:00:00',]
+zoning <- zoning[zoning$permitissuedate <= '2018-12-31 23:59:59',]
+tempData3 <- zoning %>%
+  mutate(interval60 = floor_date(ymd_hms(permitissuedate), unit = "hour"),
+         interval15 = floor_date(ymd_hms(permitissuedate), unit = "15 mins"),
+         interval_month = floor_date(ymd_hms(permitissuedate), unit = "month"),
+         interval_quarter = floor_date(ymd_hms(permitissuedate), unit = "quarter"),
+         interval_year = floor_date(ymd_hms(permitissuedate), unit = "year"),
+         year = year(interval60),
+         quarter = quarter(interval60),
+         month = month(interval60),
+         week = week(interval60),
+         dotw = wday(interval60, label=TRUE))
+
+#Graph Temporal Data
+grid.arrange(
+  ggplot(tempData1 %>%
+           group_by(interval_year) %>%
+           tally())+
+    geom_line(aes(x = interval_year, y = n))+
+    labs(title="Demolition permits issued per year, Philadelphia",
+         x="Date", 
+         y="Permits issued")+
+    plotTheme,
+  ggplot(tempData2 %>%
+           group_by(interval_year) %>%
+           tally())+
+    geom_line(aes(x = interval_year, y = n))+
+    labs(title="Alteration permits issued per year, Philadelphia",
+         x="Date", 
+         y="Permits issued")+
+    plotTheme,
+  ggplot(tempData3 %>%
+           group_by(interval_year) %>%
+           tally())+
+    geom_line(aes(x = interval_year, y = n))+
+    labs(title="Zoning permits issued per year, Philadelphia",
+         x="Date", 
+         y="Permits issued")+
+    plotTheme)
+
+```
+
+A data set is created for the quarterly LIBOR rate.  It is then plotted on a line graph which shows a sharp increase beginning in late 2015.  This is significant as it would likely lead to an increase in borrowing costs for developers of real estate as LIBOR is often a base rate for determining the interest rate of a loan.
+```{r addLibor, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Add In LIBOR-------------------
+#Source: https://fred.stlouisfed.org/series/USD1MTD156N
+libor <- read_csv('D:/DDocuments/PennMES/Fall 19/PPA/Final Project/LIBOR.csv')
+#libor <- read_csv("C:/Users/scott/Desktop/MUSA507/Final/LIBOR.csv")
+
+colnames(libor)[colnames(libor)=="USD1MTD156N"] <- "libor1Month"
+#csv had weekend rates as "." given no activity
+#below code changes "." to rate of previous day
+while(length(ind <- which(libor$libor1Month == ".")) > 0){
+  libor$libor1Month[ind] <- libor$libor1Month[ind -1]
+}
+libor <- libor[libor$DATE >= '2009-01-01',]
+
+libor$DATE<-as.character(as.character(libor$DATE))
+libor$libor1Month<-as.numeric(as.character(libor$libor1Month))
+libor <- libor %>%
+  mutate(interval_quarter = floor_date(ymd(DATE), unit = "quarter"))
+
+libor <- aggregate(libor[, 2], list(libor$interval_quarter), mean)
+
+
+#Graph Temporal Data
+ggplot(data=libor, aes(x=Group.1, y=libor1Month, group=1)) +
+  geom_line()+
+  geom_point()+
+      labs(title="Libor Rate by quarter",
+         x="Date", 
+         y="Rate")+
+  plotTheme
+
+```
+
+A data set is created for the quarterly treasury rate.  It is then plotted on a line graph which shows significant variance over time.  While this too could be an indicator of potential borrowing costs it also highlights uncertainty in the market which could impact the supply of real estate within the market if owners are hesitant to sell.
+```{r addTreasury, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Add In 10-Year Treasury Rate-------------------
+#Source: https://fred.stlouisfed.org/series/DGS10
+treasury <- read_csv("D:/DDocuments/PennMES/Fall 19/PPA/Final Project/TREASURY.csv")
+#treasury <- read_csv("C:/Users/scott/Desktop/MUSA507/Final/TREASURY.csv")
+
+colnames(treasury)[colnames(treasury)=="DGS10"] <- "tenYearRate"
+#csv had weekend rates as "." given no activity
+#below code changes "." to rate of previous day
+while(length(ind <- which(treasury$tenYearRate == ".")) > 0){
+  treasury$tenYearRate[ind] <- treasury$tenYearRate[ind -1]
+}
+treasury <- treasury[treasury$DATE >= '2009-01-01',]
+
+treasury$DATE<-as.character(as.character(treasury$DATE))
+treasury$tenYearRate<-as.numeric(as.character(treasury$tenYearRate))
+treasury <- treasury %>%
+  mutate(interval_quarter = floor_date(ymd(DATE), unit = "quarter"))
+
+treasury <- aggregate(treasury[, 2], list(treasury$interval_quarter), mean)
+
+#Graph Temporal Data
+ggplot(data=treasury, aes(x=Group.1, y=tenYearRate, group=1)) +
+  geom_line()+
+  geom_point()+
+      labs(title="10 Year Treasury Rate by quarter",
+         x="Date", 
+         y="Rate")+
+  plotTheme
+
+```
+
+A data set is created for the quarterly producer price index of lumber.  It is then plotted on a line graph which shows an upward trend in pricing  This has an impact on construction costs and could also be seen as an indicator of increasing demand for construction materials.
+```{r addLumber, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Add In Producer Price Index-Lumber-------------------
+#Source: https://fred.stlouisfed.org/series/WPU085
+lumber <- read_csv("D:/DDocuments/PennMES/Fall 19/PPA/Final Project/PPI_LUMBER.csv")
+#lumber <- read_csv("C:/Users/scott/Desktop/MUSA507/Final/PPI_LUMBER.csv")
+
+
+lumber$DATE<-as.character(as.character(lumber$DATE))
+lumber$WPU085<-as.numeric(as.character(lumber$WPU085))
+lumber <- lumber %>%
+  mutate(interval_quarter = floor_date(ymd(DATE), unit = "quarter"))
+
+lumber <- aggregate(lumber[, 2], list(lumber$interval_quarter), mean)
+
+
+#Graph Temporal Data
+ggplot(data=lumber, aes(x=Group.1, y=WPU085, group=1)) +
+  geom_line()+
+  geom_point()+
+      labs(title="PPI-Lumber by quarter",
+         x="Date", 
+         y="Price")+
+  plotTheme
+
+```
+A data set is created for the quarterly producer price index of construction equipment.  It is then plotted on a line graph which shows an upward trend in pricing  Similarly this has an impact on construction costs and could also be seen as an indicator of increasing demand for construction materials.
+```{r addEquip, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Add In Producer Price Index-Construction Equipment-------------------
+#Source: https://fred.stlouisfed.org/series/WPS112
+equip <- read_csv("D:/DDocuments/PennMES/Fall 19/PPA/Final Project/PPI_EQUIP.csv")
+#equip <- read_csv("C:/Users/scott/Desktop/MUSA507/Final/PPI_EQUIP.csv")
+
+
+equip$DATE<-as.character(as.character(equip$DATE))
+equip$WPS112<-as.numeric(as.character(equip$WPS112))
+equip <- equip %>%
+  mutate(interval_quarter = floor_date(ymd(DATE), unit = "quarter"))
+
+equip <- aggregate(equip[, 2], list(equip$interval_quarter), mean)
+
+
+#Graph Temporal Data
+ggplot(data=equip, aes(x=Group.1, y=WPS112, group=1)) +
+  geom_line()+
+  geom_point()+
+      labs(title="PPI-Equipment by quarter",
+         x="Date", 
+         y="Price")+
+  plotTheme
+
+```
+
+A data set is created for the quarterly producer price index of cement.  It is then plotted on a line graph which shows an upward trend in pricing  And like the previous two it has an impact on construction costs and could also be seen as an indicator of increasing demand for construction materials.
+```{r addCement, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#Source: https://fred.stlouisfed.org/series/PCU32733273
+cement <- read_csv("D:/DDocuments/PennMES/Fall 19/PPA/Final Project/PPI_CEMENT.csv")
+#cement <- read_csv("C:/Users/scott/Desktop/MUSA507/Final/PPI_CEMENT.csv")
+
+cement$DATE<-as.character(as.character(cement$DATE))
+cement$PCU32733273<-as.numeric(as.character(cement$PCU32733273))
+cement <- cement %>%
+  mutate(interval_quarter = floor_date(ymd(DATE), unit = "quarter"))
+
+cement <- aggregate(cement[, 2], list(cement$interval_quarter), mean)
+
+#Graph Temporal Data
+ggplot(data=cement, aes(x=Group.1, y=PCU32733273, group=1)) +
+  geom_line()+
+  geom_point()+
+      labs(title="PPI-Cement by quarter",
+         x="Date", 
+         y="Price")+
+  plotTheme
+
+```
+
+A data set is created for the quarterly US unemployment rate.  It is then plotted on a line graph which shows a significant decrease in unemployment beginning in 2009 which was the end of the recession.  This is an indicator of a stronger economy but could lead to an increase in construction costs as the labor market becomes tighter.  
+```{r addJobs, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Add In US Unemployment Rate-------------------
+#Source: https://fred.stlouisfed.org/series/UNRATE
+jobs <- read_csv("D:/DDocuments/PennMES/Fall 19/PPA/Final Project/UNRATE.csv")
+#jobs <- read_csv("C:/Users/scott/Desktop/MUSA507/Final/UNRATE.csv")
+
+
+jobs$DATE<-as.character(as.character(jobs$DATE))
+jobs$UNRATE<-as.numeric(as.character(jobs$UNRATE))
+jobs <- jobs %>%
+  mutate(interval_quarter = floor_date(ymd(DATE), unit = "quarter"))
+
+jobs <- aggregate(jobs[, 2], list(jobs$interval_quarter), mean)
+
+#Graph Temporal Data
+ggplot(data=jobs, aes(x=Group.1, y=UNRATE, group=1)) +
+  geom_line()+
+  geom_point()+
+      labs(title="US Unemployment Rate by quarter",
+         x="Date", 
+         y="Rate")+
+  plotTheme
+
+```
+
+A data set is created for the quarterly US GDP.  It is then plotted on a line graph which shows a significant increase beginning in 2009 which was the end of the recession.  This is an indicator of a stronger economy. 
+```{r addGDP, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Add In US GDP-------------------
+#Source: https://fred.stlouisfed.org/series/GDP
+GDP <- read_csv("D:/DDocuments/PennMES/Fall 19/PPA/Final Project/GDP.csv")
+#GDP <- read_csv("C:/Users/scott/Desktop/MUSA507/Final/GDP.csv")
+
+
+GDP$DATE<-as.character(as.character(GDP$DATE))
+GDP$GDP<-as.numeric(as.character(GDP$GDP))
+GDP <- GDP %>%
+  mutate(interval_quarter = floor_date(ymd(DATE), unit = "quarter"))
+
+
+#Graph Temporal Data
+ggplot(data=GDP, aes(x=interval_quarter, y=GDP, group=1)) +
+  geom_line()+
+  geom_point()+
+      labs(title="US GDP by quarter",
+         x="Date", 
+         y="Rate")+
+  plotTheme
+
+```
+
+### 3. Creating Study Panel
+A single data frame is created to aggregate all of our variables taking time into account.  It consists of 13,340 rows which is a row for every quarter for every census tract.  An ID variable is created using the quarter interval and census tract number (GEOID).  Each variable is added separately using this ID to ensure that the values are assigned to the correct time and location.
+```{r addSP, echo=TRUE, results = 'hide'}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+data_census$GEOID2<-as.numeric(as.character(data_census$GEOID))
+
+data_census <- 
+  data_census %>% 
+  st_as_sf(coords = c("long", "lat"), crs = 4326, agr = "constant") %>%
+  st_transform(st_crs(dat), 
+               join=st_intersects,
+               left = TRUE) 
+
+data_census$geometry <- NULL 
+
+length(unique(data_census$interval_quarter)) * length(unique(data_census$GEOID2))
+
+study.panel <- 
+  expand.grid(interval_quarter=unique(data_census$interval_quarter), 
+              GEOID2 = unique(data_census$GEOID2)) 
+
+
+study.panel$ID <- paste(study.panel$interval_quarter,study.panel$GEOID)
+
+nrow(study.panel)  
+
+
+#-------------------Add In Census Data-------------------
+phillyCensus$GEOID2<-as.numeric(as.character(phillyCensus$GEOID))
+
+study.panel <- 
+  left_join(study.panel, phillyCensus %>%
+              as.data.frame() %>%
+              select(-geometry), by = c("GEOID2" = "GEOID2"))
+
+#-------------------Add In Permit Count-------------------
+data_census$ID <- paste(data_census$interval_quarter,data_census$GEOID)
+data_census$permit <- 1
+
+countPermit <- function(x) {
+  
+  sumPermits  <- aggregate( permit ~ ID, x, sum)
+  study.panel$y <<- sumPermits$permit[match(study.panel$ID, sumPermits$ID)]
+  study.panel$y[is.na(study.panel$y)] <<- 0
+}
+
+countPermit(data_census); colnames(study.panel)[colnames(study.panel)=="y"] <- "Permit_Count"
+
+sum(study.panel$Permit_Count)
+sum(data_census$permit)
+
+
+#-------------------Add In Temporal Variables-------------------
+
+countTemporal <- function(x) {
+  x$permit <- 1
+  sumPermits  <- aggregate( permit ~ ID, x, sum)
+  study.panel$y <<- sumPermits$permit[match(study.panel$ID, sumPermits$ID)]
+  study.panel$y[is.na(study.panel$y)] <<- 0
+}
+
+# call the function on each month of permits
+tempData1 <- st_intersection(tempData1, phillyTracts.sf);   
+tempData1$ID <- paste(tempData1$interval_quarter,tempData1$GEOID)
+countTemporal(tempData1); colnames(study.panel)[colnames(study.panel)=="y"] <- "demolition"
+
+tempData2 <- st_intersection(tempData2, phillyTracts.sf);   
+tempData2$ID <- paste(tempData2$interval_quarter,tempData2$GEOID)
+countTemporal(tempData2); colnames(study.panel)[colnames(study.panel)=="y"] <- "alteration"
+
+tempData3 <- st_intersection(tempData3, phillyTracts.sf);   
+tempData3$ID <- paste(tempData3$interval_quarter,tempData3$GEOID)
+countTemporal(tempData3); colnames(study.panel)[colnames(study.panel)=="y"] <- "zoning"
+
+
+#-------------------Add In LIBOR-------------------
+libor$Group.1<-as.character(as.character(libor$Group.1))
+study.panel$interval_quarter<-as.character(as.character(study.panel$interval_quarter))
+
+study.panel$libor <- libor$libor1Month[match(study.panel$interval_quarter, libor$Group.1)]
+
+#-------------------Add In 10-Year Treasury Rate-------------------
+treasury$Group.1<-as.character(as.character(treasury$Group.1))
+study.panel$interval_quarter<-as.character(as.character(study.panel$interval_quarter))
+
+study.panel$treasury <- treasury$tenYearRate[match(study.panel$interval_quarter, treasury$Group.1)]
+
+#-------------------Add In US GDP-------------------
+study.panel$GDP <- GDP$GDP[match(study.panel$interval_quarter, GDP$DATE)]
+
+#GDP is quarterly
+#below code changes NA to 0 and then to rate of previous month
+study.panel$GDP[is.na(study.panel$GDP)] <- 0
+while(length(ind <- which(study.panel$GDP == 0)) > 0){
+  study.panel$GDP[ind] <- study.panel$GDP[ind -1]}
+
+
+#-------------------Add In US Unemployment Rate-------------------
+jobs$Group.1<-as.character(as.character(jobs$Group.1))
+study.panel$interval_quarter<-as.character(as.character(study.panel$interval_quarter))
+
+study.panel$UNRATE <- jobs$UNRATE[match(study.panel$interval_quarter, jobs$Group.1)]
+
+
+#-------------------Add In Producer Price Index-Lumber-------------------
+lumber$Group.1<-as.character(as.character(lumber$Group.1))
+study.panel$interval_quarter<-as.character(as.character(study.panel$interval_quarter))
+
+study.panel$lumber <- lumber$WPU085[match(study.panel$interval_quarter, lumber$Group.1)]
+
+
+#-------------------Add In Producer Price Index-Construction Equipment-------------------
+equip$Group.1<-as.character(as.character(equip$Group.1))
+study.panel$interval_quarter<-as.character(as.character(study.panel$interval_quarter))
+
+study.panel$equip <- equip$WPS112[match(study.panel$interval_quarter, equip$Group.1)]
+
+
+#-------------------Add In Producer Price Index-Cement-------------------
+cement$Group.1<-as.character(as.character(cement$Group.1))
+study.panel$interval_quarter<-as.character(as.character(study.panel$interval_quarter))
+
+study.panel$cement <- cement$PCU32733273[match(study.panel$interval_quarter, cement$Group.1)]
+
+
+```
+
+Four time lags are created to add additional nuance about the demand for permits during a given time period.  Time is lagged by one, two, three, and four quarter.  A winter lag is also created given the data shows a season drop in permits across all years.  Here a variable is created that has a 1 quarter lag for every 1st quarter permit count and the actual current quarter permit count for all others.
+```{r addtimelags, echo=TRUE, results = 'hide'}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Create Time Lags-------------------
+
+study.panel <- 
+  study.panel %>% 
+  arrange(GEOID2, interval_quarter) %>% 
+  mutate(lag1Quarter = dplyr::lag(interval_quarter,1),
+         lag2Quarters = dplyr::lag(interval_quarter,2),
+         lag3Quarters = dplyr::lag(interval_quarter,3),
+         lag4Quarters = dplyr::lag(interval_quarter,4),
+         quarter = quarter(interval_quarter),
+         winter = ifelse(quarter(interval_quarter) == 1,1,0)) %>%
+  mutate(winterLag = case_when(dplyr::lag(winter, 0) == 1 ~ lag1Quarter,
+                               dplyr::lag(winter, 0) == 0 ~ interval_quarter),
+         winterLag = replace_na(winterLag, 0))
+
+
+study.panel$lag1Quarter <- paste(study.panel$lag1Quarter,study.panel$GEOID2)
+study.panel$lag1Quarter <- study.panel$Permit_Count[match(study.panel$lag1Quarter, study.panel$ID)]
+
+
+study.panel$lag2Quarters <- paste(study.panel$lag2Quarters,study.panel$GEOID2)
+study.panel$lag2Quarters <- study.panel$Permit_Count[match(study.panel$lag2Quarters, study.panel$ID)]
+
+
+study.panel$lag3Quarters <- paste(study.panel$lag3Quarters,study.panel$GEOID2)
+study.panel$lag3Quarters <- study.panel$Permit_Count[match(study.panel$lag3Quarters, study.panel$ID)]
+
+
+study.panel$lag4Quarters <- paste(study.panel$lag4Quarters,study.panel$GEOID2)
+study.panel$lag4Quarters <- study.panel$Permit_Count[match(study.panel$lag4Quarters, study.panel$ID)]
+
+
+study.panel$winterLag <- paste(study.panel$winterLag,study.panel$GEOID2)
+study.panel$winterLag <- study.panel$Permit_Count[match(study.panel$winterLag, study.panel$ID)]
+
+
+
+```
+
+A correlation summary is generated on our variables to permit count showing most of our variables have a significant positive relationship to permit counts.  Several are above 0.80 which shows a very strong relationship.
+```{r addCorr, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Correlation-------------------
+
+#Temporal Data
+as.data.frame(study.panel) %>%
+  group_by(interval_quarter) %>% 
+  summarise_at(c(vars(starts_with("lag"),"winterLag","Permit_Count","demolition","zoning","alteration","libor",
+                      "GDP","UNRATE","treasury","lumber","equip","cement",)), mean, na.rm = TRUE) %>%
+  gather(Variable, Value, -interval_quarter, -Permit_Count) %>%
+  mutate(Variable = factor(Variable, levels=c("lag1Quarter","lag2Quarters","lag3Quarters","lag4Quarters","winterLag",
+                                              "Permit_Count","demolition","zoning","alteration", "libor","GDP",
+                                              "UNRATE","treasury","lumber","equip","cement")))%>%
+  group_by(Variable) %>%  
+  summarize(correlation = round(cor(Value, Permit_Count),2))
+
+
+
+```
+
+
+### 4. Running Models
+Our model establishes a 5-year (2014 to 2018) prediction of new construction permits based on our 10-year data set of permits issued, the temporal variables that were established through feature engineering, and the GEOID of each census tract.  Each year within our prediction is created separately and then combined prior to analysis.  First a training and test set are established and then five OLS regressions are run that factor the following: 1. time only; 2. space only; 3. both time and space; 4. time, space and time lags; 5. time, space, time lags, and winter lag.  A quarterly prediction data frame is produced for each which includes results and predictions from each of the five factors on a quarterly basis.  
+
+#### 2014
+The prediction for 2014 used a training set based on permits and temporal data from 2009 to 2013.  The test set was year 2014.  
+```{r add2014, echo=TRUE, results = 'hide'}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Run Model 2014-------------------
+
+study.panel <- study.panel %>%
+  mutate(quarter = quarter(interval_quarter),
+         year = year(interval_quarter))
+
+study.Train <- filter(study.panel, year <= c(2013))
+study.Test <- filter(study.panel, year == c(2014))
+
+reg1 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE,  data=study.Train)
+
+reg2 <- 
+  lm(Permit_Count ~  GEOID2,  data=study.Train)
+
+reg3 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID,  data=study.Train)
+
+reg4 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID +
+       lag1Quarter + lag2Quarters + lag3Quarters + lag4Quarters,  data=study.Train)
+
+reg5 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID +
+       lag1Quarter + lag2Quarters + lag3Quarters + lag4Quarters + winterLag + winter,  data=study.Train)
+
+study.Test.quarterNest <- 
+  study.Test %>%
+  nest(-quarter) 
+
+model_pred <- function(newConstruct, fit){
+  pred <- predict(fit, newdata = newConstruct)}
+
+quarter_predictions1 <- 
+  study.Test.quarterNest %>% 
+  mutate(ATime_FE = map(.x = data, fit = reg1, .f = model_pred),
+         BSpace_FE = map(.x = data, fit = reg2, .f = model_pred),
+         CTime_Space_FE = map(.x = data, fit = reg3, .f = model_pred),
+         DTime_Space_FE_timeLags = map(.x = data, fit = reg4, .f = model_pred),
+         ETime_Space_FE_timeLags_winterLags = map(.x = data, fit = reg5, .f = model_pred)) %>%
+  gather(Regression, Prediction, -data, -quarter) %>%
+  mutate(Observed = map(data, pull, Permit_Count),
+         Absolute_Error = map2(Observed, Prediction,  ~ abs(.x - .y)),
+         MAE = map_dbl(Absolute_Error, mean, na.rm = TRUE),
+         sd_AE = map_dbl(Absolute_Error, sd, na.rm = TRUE))
+
+       
+
+```
+
+#### 2015
+The prediction for 2015 used a training set based on permits and temporal data from 2009 to 2014.  The test set was year 2015.  
+```{r add2015, echo=TRUE, results = 'hide'}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Run Model 2015-------------------
+
+study.Train <- filter(study.panel, year <= c(2014))
+study.Test <- filter(study.panel, year == c(2015))
+
+reg1 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE,  data=study.Train)
+
+reg2 <- 
+  lm(Permit_Count ~  GEOID2,  data=study.Train)
+
+reg3 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID,  data=study.Train)
+
+reg4 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID +
+       lag1Quarter + lag2Quarters + lag3Quarters + lag4Quarters,  data=study.Train)
+
+reg5 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID +
+       lag1Quarter + lag2Quarters + lag3Quarters + lag4Quarters + winterLag + winter,  data=study.Train)
+
+study.Test.quarterNest <- 
+  study.Test %>%
+  nest(-quarter) 
+
+model_pred <- function(newConstruct, fit){
+  pred <- predict(fit, newdata = newConstruct)}
+
+quarter_predictions2 <- 
+  study.Test.quarterNest %>% 
+  mutate(ATime_FE = map(.x = data, fit = reg1, .f = model_pred),
+         BSpace_FE = map(.x = data, fit = reg2, .f = model_pred),
+         CTime_Space_FE = map(.x = data, fit = reg3, .f = model_pred),
+         DTime_Space_FE_timeLags = map(.x = data, fit = reg4, .f = model_pred),
+         ETime_Space_FE_timeLags_winterLags = map(.x = data, fit = reg5, .f = model_pred)) %>%
+  gather(Regression, Prediction, -data, -quarter) %>%
+  mutate(Observed = map(data, pull, Permit_Count),
+         Absolute_Error = map2(Observed, Prediction,  ~ abs(.x - .y)),
+         MAE = map_dbl(Absolute_Error, mean, na.rm = TRUE),
+         sd_AE = map_dbl(Absolute_Error, sd, na.rm = TRUE))
+
+
+
+       
+
+```
+
+#### 2016
+The prediction for 2016 used a training set based on permits and temporal data from 2009 to 2015.  The test set was year 2016.
+```{r add2016, echo=TRUE, results = 'hide'}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Run Model 2016-------------------
+
+study.Train <- filter(study.panel, year <= c(2015))
+study.Test <- filter(study.panel, year == c(2016))
+
+reg1 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE,  data=study.Train)
+
+reg2 <- 
+  lm(Permit_Count ~  GEOID2,  data=study.Train)
+
+reg3 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID,  data=study.Train)
+
+reg4 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID +
+       lag1Quarter + lag2Quarters + lag3Quarters + lag4Quarters,  data=study.Train)
+
+reg5 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID +
+       lag1Quarter + lag2Quarters + lag3Quarters + lag4Quarters + winterLag + winter,  data=study.Train)
+
+study.Test.quarterNest <- 
+  study.Test %>%
+  nest(-quarter) 
+
+model_pred <- function(newConstruct, fit){
+  pred <- predict(fit, newdata = newConstruct)}
+
+quarter_predictions3 <- 
+  study.Test.quarterNest %>% 
+  mutate(ATime_FE = map(.x = data, fit = reg1, .f = model_pred),
+         BSpace_FE = map(.x = data, fit = reg2, .f = model_pred),
+         CTime_Space_FE = map(.x = data, fit = reg3, .f = model_pred),
+         DTime_Space_FE_timeLags = map(.x = data, fit = reg4, .f = model_pred),
+         ETime_Space_FE_timeLags_winterLags = map(.x = data, fit = reg5, .f = model_pred)) %>%
+  gather(Regression, Prediction, -data, -quarter) %>%
+  mutate(Observed = map(data, pull, Permit_Count),
+         Absolute_Error = map2(Observed, Prediction,  ~ abs(.x - .y)),
+         MAE = map_dbl(Absolute_Error, mean, na.rm = TRUE),
+         sd_AE = map_dbl(Absolute_Error, sd, na.rm = TRUE))
+       
+
+```
+
+#### 2017
+The prediction for 2017 used a training set based on permits and temporal data from 2009 to 2016.  The test set was year 2017.  
+```{r add2017, echo=TRUE, results = 'hide'}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Run Model 2017-------------------
+
+study.Train <- filter(study.panel, year <= c(2016))
+study.Test <- filter(study.panel, year == c(2017))
+
+reg1 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE,  data=study.Train)
+
+reg2 <- 
+  lm(Permit_Count ~  GEOID2,  data=study.Train)
+
+reg3 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID,  data=study.Train)
+
+reg4 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID +
+       lag1Quarter + lag2Quarters + lag3Quarters + lag4Quarters,  data=study.Train)
+
+reg5 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID +
+       lag1Quarter + lag2Quarters + lag3Quarters + lag4Quarters + winterLag + winter,  data=study.Train)
+
+study.Test.quarterNest <- 
+  study.Test %>%
+  nest(-quarter) 
+
+model_pred <- function(newConstruct, fit){
+  pred <- predict(fit, newdata = newConstruct)}
+
+quarter_predictions4 <- 
+  study.Test.quarterNest %>% 
+  mutate(ATime_FE = map(.x = data, fit = reg1, .f = model_pred),
+         BSpace_FE = map(.x = data, fit = reg2, .f = model_pred),
+         CTime_Space_FE = map(.x = data, fit = reg3, .f = model_pred),
+         DTime_Space_FE_timeLags = map(.x = data, fit = reg4, .f = model_pred),
+         ETime_Space_FE_timeLags_winterLags = map(.x = data, fit = reg5, .f = model_pred)) %>%
+  gather(Regression, Prediction, -data, -quarter) %>%
+  mutate(Observed = map(data, pull, Permit_Count),
+         Absolute_Error = map2(Observed, Prediction,  ~ abs(.x - .y)),
+         MAE = map_dbl(Absolute_Error, mean, na.rm = TRUE),
+         sd_AE = map_dbl(Absolute_Error, sd, na.rm = TRUE))
+       
+
+```
+
+#### 2018
+The prediction for 2018 used a training set based on permits and temporal data from 2009 to 2017.  The test set was year 2018. 
+```{r add2018, echo=TRUE, results = 'hide'}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Run Model 2018-------------------
+
+study.Train <- filter(study.panel, year <= c(2017))
+study.Test <- filter(study.panel, year == c(2018))
+
+reg1 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE,  data=study.Train)
+
+reg2 <- 
+  lm(Permit_Count ~  GEOID2,  data=study.Train)
+
+reg3 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID,  data=study.Train)
+
+reg4 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID +
+       lag1Quarter + lag2Quarters + lag3Quarters + lag4Quarters,  data=study.Train)
+
+reg5 <- 
+  lm(Permit_Count ~  quarter(interval_quarter) + year + demolition + alteration + zoning + GDP +
+       lumber + cement + equip + libor + treasury + UNRATE + GEOID +
+       lag1Quarter + lag2Quarters + lag3Quarters + lag4Quarters + winterLag + winter,  data=study.Train)
+
+study.Test.quarterNest <- 
+  study.Test %>%
+  nest(-quarter) 
+
+model_pred <- function(newConstruct, fit){
+  pred <- predict(fit, newdata = newConstruct)}
+
+quarter_predictions5 <- 
+  study.Test.quarterNest %>% 
+  mutate(ATime_FE = map(.x = data, fit = reg1, .f = model_pred),
+         BSpace_FE = map(.x = data, fit = reg2, .f = model_pred),
+         CTime_Space_FE = map(.x = data, fit = reg3, .f = model_pred),
+         DTime_Space_FE_timeLags = map(.x = data, fit = reg4, .f = model_pred),
+         ETime_Space_FE_timeLags_winterLags = map(.x = data, fit = reg5, .f = model_pred)) %>%
+  gather(Regression, Prediction, -data, -quarter) %>%
+  mutate(Observed = map(data, pull, Permit_Count),
+         Absolute_Error = map2(Observed, Prediction,  ~ abs(.x - .y)),
+         MAE = map_dbl(Absolute_Error, mean, na.rm = TRUE),
+         sd_AE = map_dbl(Absolute_Error, sd, na.rm = TRUE))
+     
+
+```
+
+#### Combining Data
+Each of the results are then aggregated into one data frame.  Each data frame contains 20 rows of data which are quarterly results for each of the five factors.  Here functions like rbind() and merge() would not work as these include nested data frames.  Rows were instead copied to the bottom of the 2014 data frame so the end result was a 100 row data frame that included quarterly results of the five factors for years 2014 to 2018.
+```{r addall, echo=TRUE, results = 'hide'}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Combine Models-------------------
+#Add 2015
+quarter_predictions1[21,] <- quarter_predictions2[1,];quarter_predictions1[22,] <- quarter_predictions2[2,]
+quarter_predictions1[23,] <- quarter_predictions2[3,];quarter_predictions1[24,] <- quarter_predictions2[4,]
+quarter_predictions1[25,] <- quarter_predictions2[5,];quarter_predictions1[26,] <- quarter_predictions2[6,]
+quarter_predictions1[27,] <- quarter_predictions2[7,];quarter_predictions1[28,] <- quarter_predictions2[8,]
+quarter_predictions1[29,] <- quarter_predictions2[9,];quarter_predictions1[30,] <- quarter_predictions2[10,]
+quarter_predictions1[31,] <- quarter_predictions2[11,];quarter_predictions1[32,] <- quarter_predictions2[12,]
+quarter_predictions1[33,] <- quarter_predictions2[13,];quarter_predictions1[34,] <- quarter_predictions2[14,]
+quarter_predictions1[35,] <- quarter_predictions2[15,];quarter_predictions1[36,] <- quarter_predictions2[16,]
+quarter_predictions1[37,] <- quarter_predictions2[17,];quarter_predictions1[38,] <- quarter_predictions2[18,]
+quarter_predictions1[39,] <- quarter_predictions2[19,];quarter_predictions1[40,] <- quarter_predictions2[20,]
+
+#Add 2016
+quarter_predictions1[41,] <- quarter_predictions3[1,];quarter_predictions1[42,] <- quarter_predictions3[2,]
+quarter_predictions1[43,] <- quarter_predictions3[3,];quarter_predictions1[44,] <- quarter_predictions3[4,]
+quarter_predictions1[45,] <- quarter_predictions3[5,];quarter_predictions1[46,] <- quarter_predictions3[6,]
+quarter_predictions1[47,] <- quarter_predictions3[7,];quarter_predictions1[48,] <- quarter_predictions3[8,]
+quarter_predictions1[49,] <- quarter_predictions3[9,];quarter_predictions1[50,] <- quarter_predictions3[10,]
+quarter_predictions1[51,] <- quarter_predictions3[11,];quarter_predictions1[52,] <- quarter_predictions3[12,]
+quarter_predictions1[53,] <- quarter_predictions3[13,];quarter_predictions1[54,] <- quarter_predictions3[14,]
+quarter_predictions1[55,] <- quarter_predictions3[15,];quarter_predictions1[56,] <- quarter_predictions3[16,]
+quarter_predictions1[57,] <- quarter_predictions3[17,];quarter_predictions1[58,] <- quarter_predictions3[18,]
+quarter_predictions1[59,] <- quarter_predictions3[19,];quarter_predictions1[60,] <- quarter_predictions3[20,]
+
+#Add 2017
+quarter_predictions1[61,] <- quarter_predictions4[1,];quarter_predictions1[62,] <- quarter_predictions4[2,]
+quarter_predictions1[63,] <- quarter_predictions4[3,];quarter_predictions1[64,] <- quarter_predictions4[4,]
+quarter_predictions1[65,] <- quarter_predictions4[5,];quarter_predictions1[66,] <- quarter_predictions4[6,]
+quarter_predictions1[67,] <- quarter_predictions4[7,];quarter_predictions1[68,] <- quarter_predictions4[8,]
+quarter_predictions1[69,] <- quarter_predictions4[9,];quarter_predictions1[70,] <- quarter_predictions4[10,]
+quarter_predictions1[71,] <- quarter_predictions4[11,];quarter_predictions1[72,] <- quarter_predictions4[12,]
+quarter_predictions1[73,] <- quarter_predictions4[13,];quarter_predictions1[74,] <- quarter_predictions4[14,]
+quarter_predictions1[75,] <- quarter_predictions4[15,];quarter_predictions1[76,] <- quarter_predictions4[16,]
+quarter_predictions1[77,] <- quarter_predictions4[17,];quarter_predictions1[78,] <- quarter_predictions4[18,]
+quarter_predictions1[79,] <- quarter_predictions4[19,];quarter_predictions1[80,] <- quarter_predictions4[20,]
+
+#Add 2018
+quarter_predictions1[81,] <- quarter_predictions5[1,];quarter_predictions1[82,] <- quarter_predictions5[2,]
+quarter_predictions1[83,] <- quarter_predictions5[3,];quarter_predictions1[84,] <- quarter_predictions5[4,]
+quarter_predictions1[85,] <- quarter_predictions5[5,];quarter_predictions1[86,] <- quarter_predictions5[6,]
+quarter_predictions1[87,] <- quarter_predictions5[7,];quarter_predictions1[88,] <- quarter_predictions5[8,]
+quarter_predictions1[89,] <- quarter_predictions5[9,];quarter_predictions1[90,] <- quarter_predictions5[10,]
+quarter_predictions1[91,] <- quarter_predictions5[11,];quarter_predictions1[92,] <- quarter_predictions5[12,]
+quarter_predictions1[93,] <- quarter_predictions5[13,];quarter_predictions1[94,] <- quarter_predictions5[14,]
+quarter_predictions1[95,] <- quarter_predictions5[15,];quarter_predictions1[96,] <- quarter_predictions5[16,]
+quarter_predictions1[97,] <- quarter_predictions5[17,];quarter_predictions1[98,] <- quarter_predictions5[18,]
+quarter_predictions1[99,] <- quarter_predictions5[19,];quarter_predictions1[100,] <- quarter_predictions5[20,]
+
+     
+
+```
+
+
+### 5. Examine Error Metrics for Accuracy
+A bar chart shows the mean absolute error of prediction results by quarter for each of our five factors.  Here we see that error remains highest in the 1st quarter which is where we visibly saw the most variance in our exploratory analysis.  The winter lag does provide some improvement to the 1st quarter results and also shows to reduce the error in the remaining three quarters.
+```{r errorBar, echo=TRUE}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Examine Error Metrics for Accuracy-------------------
+quarter_predictions1 %>%
+  dplyr::select(quarter, Regression, MAE) %>%
+  gather(Variable, MAE, -Regression, -quarter) %>%
+  ggplot(aes(quarter, MAE)) + 
+  geom_bar(aes(fill = Regression), position = "dodge", stat="identity") +
+  scale_fill_manual(values = palette5) +
+  labs(title = "Mean Absolute Errors by model specification and quarter", subtitle = "Linear Regression") +
+  plotTheme
+
+
+
+
+```
+
+A line graph shows a comparison of observed and predicted between the five factors.  Here we see that factor 5 (time, space, time lags, and winter lag) has predictions that are closest to the observed.  
+```{r errorline, echo=TRUE, fig.height=7.5, fig.width=7.5}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#-------------------Examine Error Metrics for Accuracy-------------------
+quarter_predictions1 %>% 
+  mutate(interval_quarter = map(data, pull, interval_quarter),
+         GEOID2 = map(data, pull, GEOID2)) %>%
+  dplyr::select(interval_quarter, GEOID2, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  gather(Variable, Value, -Regression, -interval_quarter, -GEOID2) %>%
+  group_by(Regression, Variable, interval_quarter) %>%
+  summarize(Value = sum(Value)) %>%
+  ggplot(aes(interval_quarter, Value, group=Variable, color = Variable)) + 
+  geom_line(size = 1.1) + 
+  facet_wrap(~Regression, ncol=1) +
+  labs(title = "Predicted/Observed new construction permit time series", subtitle = "Linear Regression",  x = "Quarter", y= "Permits") +
+  plotTheme
+
+
+```
+
+Going forward we review factor 5 in greater detail. A set of faceted maps shows the mean absolute error mapped by census tract and year.  This allows us to see the results both by time and space.  Here we see the most errors in the areas with the most permit activity which is in the general area of Kensington and Fishtown tracts.
+```{r errorMap, echo=TRUE, fig.height=10, fig.width=7.5}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#################
+predict1 <- 
+  quarter_predictions1 %>%          
+  mutate(GEOID2 = map(data, pull, GEOID)) %>%
+  dplyr::select(GEOID2, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  filter(Regression == "ETime_Space_FE_timeLags_winterLags") %>%
+  group_by(GEOID2) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))
+
+predict2 <- 
+  quarter_predictions2 %>%          
+  mutate(GEOID2 = map(data, pull, GEOID)) %>%
+  dplyr::select(GEOID2, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  filter(Regression == "ETime_Space_FE_timeLags_winterLags") %>%
+  group_by(GEOID2) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))
+
+predict3 <- 
+  quarter_predictions3 %>%          
+  mutate(GEOID2 = map(data, pull, GEOID)) %>%
+  dplyr::select(GEOID2, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  filter(Regression == "ETime_Space_FE_timeLags_winterLags") %>%
+  group_by(GEOID2) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))
+
+predict4 <- 
+  quarter_predictions4 %>%          
+  mutate(GEOID2 = map(data, pull, GEOID)) %>%
+  dplyr::select(GEOID2, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  filter(Regression == "ETime_Space_FE_timeLags_winterLags") %>%
+  group_by(GEOID2) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))
+
+predict5 <- 
+  quarter_predictions5 %>%          
+  mutate(GEOID2 = map(data, pull, GEOID)) %>%
+  dplyr::select(GEOID2, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  filter(Regression == "ETime_Space_FE_timeLags_winterLags") %>%
+  group_by(GEOID2) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))
+
+
+phillyTracts.sf <- 
+  phillyTracts %>% 
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, agr = "constant") %>%
+  st_transform(st_crs(dat), 
+               join=st_intersects,
+               left = TRUE) 
+
+
+phillyTracts.sf$y2014 <- predict1$MAE[match(phillyTracts.sf$GEOID, predict1$GEOID2)]
+phillyTracts.sf$y2014[is.na(phillyTracts.sf$y2014)] <- 0
+
+phillyTracts.sf$y2015 <- predict2$MAE[match(phillyTracts.sf$GEOID, predict2$GEOID2)]
+phillyTracts.sf$y2015[is.na(phillyTracts.sf$y2015)] <- 0
+
+phillyTracts.sf$y2016 <- predict3$MAE[match(phillyTracts.sf$GEOID, predict3$GEOID2)]
+phillyTracts.sf$y2016[is.na(phillyTracts.sf$y2016)] <- 0
+
+phillyTracts.sf$y2017 <- predict4$MAE[match(phillyTracts.sf$GEOID, predict4$GEOID2)]
+phillyTracts.sf$y2017[is.na(phillyTracts.sf$y2017)] <- 0
+
+phillyTracts.sf$y2018 <- predict5$MAE[match(phillyTracts.sf$GEOID, predict5$GEOID2)]
+phillyTracts.sf$y2018[is.na(phillyTracts.sf$y2018)] <- 0
+
+
+# need to transform df into long format so you get each year as a variable
+phillyTracts.long <- phillyTracts.sf %>%
+  gather(year, MAE, y2014:y2018)
+
+
+
+ggplot() + 
+  geom_sf(data = phillyTracts.long, aes(fill = MAE)) + 
+  labs(title = "Mean Abs Error, All Sets, Model 5") +
+  mapTheme + facet_wrap(~year, ncol =2) + scale_fill_viridis_c(option = "plasma")
+
+
+```
+
+
+### 6. Prediction
+A set of faceted maps shows the predicted permit count mapped by census tract and year.  This allows us to see the results both by time and space.  Here we see the most predicted permits in the general area of Kensington and Fishtown tracts.
+```{r predictrMap, echo=TRUE, fig.height=10, fig.width=7.5}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+#################
+predict1 <- 
+  quarter_predictions1 %>%          
+  mutate(GEOID2 = map(data, pull, GEOID)) %>%
+  dplyr::select(GEOID2, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  filter(Regression == "ETime_Space_FE_timeLags_winterLags") %>%
+  group_by(GEOID2) %>%
+  summarize(SUM = sum(abs(Prediction), na.rm = TRUE))
+
+predict2 <- 
+  quarter_predictions2 %>%          
+  mutate(GEOID2 = map(data, pull, GEOID)) %>%
+  dplyr::select(GEOID2, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  filter(Regression == "ETime_Space_FE_timeLags_winterLags") %>%
+  group_by(GEOID2) %>%
+  summarize(SUM = sum(abs(Prediction), na.rm = TRUE))
+
+predict3 <- 
+  quarter_predictions3 %>%          
+  mutate(GEOID2 = map(data, pull, GEOID)) %>%
+  dplyr::select(GEOID2, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  filter(Regression == "ETime_Space_FE_timeLags_winterLags") %>%
+  group_by(GEOID2) %>%
+  summarize(SUM = sum(abs(Prediction), na.rm = TRUE))
+
+predict4 <- 
+  quarter_predictions4 %>%          
+  mutate(GEOID2 = map(data, pull, GEOID)) %>%
+  dplyr::select(GEOID2, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  filter(Regression == "ETime_Space_FE_timeLags_winterLags") %>%
+  group_by(GEOID2) %>%
+  summarize(SUM = sum(abs(Prediction), na.rm = TRUE))
+
+predict5 <- 
+  quarter_predictions5 %>%          
+  mutate(GEOID2 = map(data, pull, GEOID)) %>%
+  dplyr::select(GEOID2, Observed, Prediction, Regression) %>%
+  unnest() %>%
+  filter(Regression == "ETime_Space_FE_timeLags_winterLags") %>%
+  group_by(GEOID2) %>%
+  summarize(SUM = sum(abs(Prediction), na.rm = TRUE))
+
+
+phillyTracts.sf <- 
+  phillyTracts %>% 
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, agr = "constant") %>%
+  st_transform(st_crs(dat), 
+               join=st_intersects,
+               left = TRUE) 
+
+
+phillyTracts.sf$y2014 <- predict1$SUM[match(phillyTracts.sf$GEOID, predict1$GEOID2)]
+phillyTracts.sf$y2014[is.na(phillyTracts.sf$y2014)] <- 0
+
+phillyTracts.sf$y2015 <- predict2$SUM[match(phillyTracts.sf$GEOID, predict2$GEOID2)]
+phillyTracts.sf$y2015[is.na(phillyTracts.sf$y2015)] <- 0
+
+phillyTracts.sf$y2016 <- predict3$SUM[match(phillyTracts.sf$GEOID, predict3$GEOID2)]
+phillyTracts.sf$y2016[is.na(phillyTracts.sf$y2016)] <- 0
+
+phillyTracts.sf$y2017 <- predict4$SUM[match(phillyTracts.sf$GEOID, predict4$GEOID2)]
+phillyTracts.sf$y2017[is.na(phillyTracts.sf$y2017)] <- 0
+
+phillyTracts.sf$y2018 <- predict5$SUM[match(phillyTracts.sf$GEOID, predict5$GEOID2)]
+phillyTracts.sf$y2018[is.na(phillyTracts.sf$y2018)] <- 0
+
+
+# need to transform df into long format so you get each year as a variable
+phillyTracts.long <- phillyTracts.sf %>%
+  gather(year, SUM, y2014:y2018)
+
+
+
+ggplot() + 
+  geom_sf(data = phillyTracts.long, aes(fill = SUM)) + 
+  labs(title = "Total Predicted Permits, All Sets, Model 5") +
+  mapTheme + facet_wrap(~year, ncol =2) + scale_fill_viridis_c(option = "plasma")
+
+
+
+```
+
+A single map is then generated to show the total predicted permit counts by census tract for the full 5-year prediction period.  This is a potential indicator of future development.  Here we see tract 42101016100 has the highest predicted permit count over that 5-year period.  This is East Kensington and includes North Square Park and Temple University Hospital. 
+```{r predictrMap2, echo=TRUE, fig.height=7.5, fig.width=7.5}
+
+knitr::opts_chunk$set(cache=TRUE)
+
+phillyTracts.sf$FINAL <- phillyTracts.sf$y2018 + phillyTracts.sf$y2017 + phillyTracts.sf$y2016 +
+  phillyTracts.sf$y2015 + phillyTracts.sf$y2014
+phillyTracts.sf$y2014 <- NULL
+phillyTracts.sf$y2015 <- NULL
+phillyTracts.sf$y2016 <- NULL
+phillyTracts.sf$y2017 <- NULL
+phillyTracts.sf$y2018 <- NULL
+
+phillyTracts.long <- phillyTracts.sf %>%
+  gather(year, SUM, FINAL)
+
+ggplot() + 
+  geom_sf(data = phillyTracts.long, aes(fill = SUM)) + 
+  labs(title = "Census Tracts by total predicted permit count over next five years") +
+  mapTheme + facet_wrap(~year) + scale_fill_viridis_c(option = "plasma")
+
+
+```
+
+
+### 7. Conclusion
+#### Other Target Users
+Capitalizing on emerging development may invovle a lot of other considerations. Ideally, the users of the app would be well informed on the demographics of the City they are developing within. Outside of the real estate industry, we also envision this app could be used to help local government in terms of proactivately targeting neighborhoods predicted as most likely to develop. Forecasting shifts in new construction permits may also lead to other questions about the types of industries receiving those permits, and from which developers. In this sense, better analysis of data already made available could help the City engage with the right communities and help them prepare in the best ways for coming changes.
+
+#### Envisioning Future Adoption
+Additionally, we acknowledge that if P3 was widely adopted we could see disruptions in the normal rate and intensity of how permits are issued across the City. If developers are able to see emerging areas before they occur, and then they invest in them earlier - the forecasting may artifically inflate listing prices. We suspect this would depend on how long the app would be put into use (one year vs. a decade or more), the level to which it would be adapted (are only a few developers using it vs. most of the industry), and also how accurate the forcasts turn out to be (which would play into how seriously the predictions are actually considered in whether to buy a listing). It would take a substantial amount of time to see these kinds of changes in the market, but as we know with other contemporary apps - it is certainly likely and possible.
+
+#### Additional Features and Possibilities
+The integration of the Zillow API we found would be difficult to practical implement given how inflexible the request calls actually are. We imagine we would need to explore other internet real estate resources if we wanted to make this app a reality. Additionally, given the aforementioned remarks on other target users - we also imagined being able to identify local community partners with the app who could also be marked within a census tract of interest. In this way we could better engage developers looking to purchase listings in the City with the communities they will undoubtably shape in the future. 
